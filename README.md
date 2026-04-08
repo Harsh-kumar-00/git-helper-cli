@@ -74,7 +74,3 @@ require confirmation before execution.
 ## Troubleshooting
 - **"OpenRouter API key is not set"**: run `/setkey <key>` or set `OPENROUTER_API_KEY`.
 - **"Invalid or unsafe command generated"**: try rephrasing or use a built-in command.
-
-## License
-No license is currently specified in this repository. If you plan to distribute
-or reuse this project, add a LICENSE file and update this section.
