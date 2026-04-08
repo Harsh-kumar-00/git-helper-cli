@@ -18,7 +18,7 @@ powered by OpenRouter.
 
 ## Installation
 ```bash
-git clone <your-fork-or-repo-url>
+git clone https://github.com/Harsh-kumar-00/git-helper-cli.git
 cd git-helper-cli
 ```
 
@@ -76,4 +76,5 @@ require confirmation before execution.
 - **"Invalid or unsafe command generated"**: try rephrasing or use a built-in command.
 
 ## License
-No license is currently specified in this repository.
+No license is currently specified in this repository. If you plan to distribute
+or reuse this project, add a LICENSE file and update this section.
