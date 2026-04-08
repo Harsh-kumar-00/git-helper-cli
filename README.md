@@ -21,6 +21,7 @@ powered by OpenRouter.
 git clone https://github.com/Harsh-kumar-00/git-helper-cli.git
 cd git-helper-cli
 ```
+No additional Python dependencies are required beyond the standard library.
 
 ## Configuration
 Set your OpenRouter key in one of these ways:
