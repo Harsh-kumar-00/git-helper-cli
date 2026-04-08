@@ -7,12 +7,59 @@ import shlex
 import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+
+class GitHelperError(Exception):
+    """Base exception for all git helper errors."""
+
+class APIError(GitHelperError):
+    """Raised when there's an issue communicating with the OpenRouter API."""
+
+class CommandSafetyError(GitHelperError):
+    """Raised when a generated command is deemed unsafe or invalid."""
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "openrouter/auto"
-ALLOWED_AI_SUBCOMMANDS = {"status", "add", "commit", "push", "pull"}
+ALLOWED_AI_SUBCOMMANDS = {
+    "status", "add", "commit", "push", "pull", "log", "diff", 
+    "branch", "checkout", "switch", "restore", "stash", "merge", "rebase"
+}
 INVALID_AI_COMMAND_MESSAGE = "Invalid or unsafe command generated"
+
+
+def get_api_key() -> str:
+    """Retrieve the OpenRouter API key from environment or config file."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if api_key:
+        return api_key
+
+    config_path = Path.home() / ".git-helper-cli.json"
+    if config_path.exists():
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                config = json.load(f)
+                return config.get("openrouter_api_key", "")
+        except json.JSONDecodeError:
+            pass
+    return ""
+
+
+def set_api_key(api_key: str) -> None:
+    """Save the OpenRouter API key to the config file."""
+    config_path = Path.home() / ".git-helper-cli.json"
+    config = {}
+    if config_path.exists():
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            pass
+            
+    config["openrouter_api_key"] = api_key
+    with config_path.open("w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4)
 
 
 def parse_predefined_command(user_input: str) -> list[str] | None:
@@ -35,12 +82,12 @@ def parse_predefined_command(user_input: str) -> list[str] | None:
         return ["git", "pull"]
 
     if lowered == "commit":
-        raise ValueError("Use: commit <message>")
+        raise GitHelperError("Use: commit <message>")
 
     if lowered.startswith("commit "):
         message = _normalize_commit_message(text[7:].strip())
         if not message:
-            raise ValueError("Commit message cannot be empty.")
+            raise GitHelperError("Commit message cannot be empty.")
         return ["git", "commit", "-m", message]
 
     return None
@@ -94,9 +141,10 @@ def command_needs_confirmation(command: list[str]) -> bool:
 
 
 def generate_commit_message() -> str:
+    """Generate a commit message based on the current staged/unstaged changes."""
     context, has_changes = _build_git_context()
     if not has_changes:
-        raise ValueError("No changes found to build a commit message from.")
+        raise GitHelperError("No changes found to build a commit message from.")
 
     content = _call_openrouter(
         messages=[
@@ -122,7 +170,7 @@ def generate_commit_message() -> str:
     parsed = _extract_json_object(content)
     message = _normalize_commit_message(str(parsed.get("message", "")).strip())
     if not message:
-        raise ValueError("OpenRouter did not return a commit message.")
+        raise APIError("OpenRouter did not return a commit message.")
 
     return message
 
@@ -176,6 +224,7 @@ def get_next_suggestion(command: list[str], success: bool, output: str) -> str:
 
 
 def suggest_git_actions() -> tuple[str, str]:
+    """Suggest a commit message and a next practical git action."""
     context, _ = _build_git_context()
     content = _call_openrouter(
         messages=[
@@ -206,10 +255,10 @@ def suggest_git_actions() -> tuple[str, str]:
     next_action = str(parsed.get("next_action", "")).strip()
 
     if not commit_message:
-        raise ValueError("OpenRouter did not return a commit message suggestion.")
+        raise APIError("OpenRouter did not return a commit message suggestion.")
 
     if not next_action:
-        raise ValueError("OpenRouter did not return a next action suggestion.")
+        raise APIError("OpenRouter did not return a next action suggestion.")
 
     return commit_message, next_action
 
@@ -275,19 +324,19 @@ def _capture_command(command: list[str]) -> tuple[bool, str, str, int]:
 def _build_git_context() -> tuple[str, bool]:
     status_ok, status_stdout, status_stderr, _ = _capture_command(["git", "status", "--sb"])
     if not status_ok:
-        raise ValueError(_join_output(status_stderr, status_stdout) or "Could not read git status.")
+        raise GitHelperError(_join_output(status_stderr, status_stdout) or "Could not read git status.")
 
     staged_ok, staged_stdout, staged_stderr, _ = _capture_command(
         ["git", "diff", "--cached", "--no-ext-diff", "--unified=0"]
     )
     if not staged_ok:
-        raise ValueError(_join_output(staged_stderr, staged_stdout) or "Could not read staged diff.")
+        raise GitHelperError(_join_output(staged_stderr, staged_stdout) or "Could not read staged diff.")
 
     unstaged_ok, unstaged_stdout, unstaged_stderr, _ = _capture_command(
         ["git", "diff", "--no-ext-diff", "--unified=0"]
     )
     if not unstaged_ok:
-        raise ValueError(_join_output(unstaged_stderr, unstaged_stdout) or "Could not read working tree diff.")
+        raise GitHelperError(_join_output(unstaged_stderr, unstaged_stdout) or "Could not read working tree diff.")
 
     status_text = status_stdout or "No status output."
     staged_diff = _clip_text(staged_stdout or "No staged diff.")
@@ -307,7 +356,7 @@ def _extract_message_content(data: dict) -> str:
     try:
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("OpenRouter returned an unexpected response format.") from exc
+        raise APIError("OpenRouter returned an unexpected response format.") from exc
 
 
 def _extract_command_text(content: str) -> str:
@@ -327,33 +376,33 @@ def _extract_command_text(content: str) -> str:
 def _validate_ai_command(command_text: str) -> list[str]:
     cleaned = command_text.strip()
     if not cleaned or _contains_unsafe_shell_syntax(cleaned):
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE)
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE)
 
     try:
         command = shlex.split(cleaned)
     except ValueError as exc:
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE) from exc
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE) from exc
 
     if len(command) < 2:
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE)
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE)
 
     if command[0] != "git":
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE)
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE)
 
     if command[1] not in ALLOWED_AI_SUBCOMMANDS:
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE)
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE)
 
     if any(token in {"&&", "||", ";", "|", "&"} for token in command):
-        raise ValueError(INVALID_AI_COMMAND_MESSAGE)
+        raise CommandSafetyError(INVALID_AI_COMMAND_MESSAGE)
 
     return command
 
 
 def _call_openrouter(messages: list[dict[str, str]], max_tokens: int) -> str:
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = get_api_key()
     if not api_key:
-        raise ValueError(
-            "OPENROUTER_API_KEY is not set. Add it to use AI features."
+        raise GitHelperError(
+            "OpenRouter API key is not set. Use /setkey <your_key> or set OPENROUTER_API_KEY env var."
         )
 
     payload = {
@@ -385,14 +434,14 @@ def _call_openrouter(messages: list[dict[str, str]], max_tokens: int) -> str:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
-        raise ValueError(
+        raise APIError(
             f"OpenRouter request failed with status {exc.code}: "
             f"{_extract_error_message(error_body)}"
         ) from exc
     except urllib.error.URLError as exc:
-        raise ValueError(f"Could not reach OpenRouter: {exc.reason}") from exc
+        raise APIError(f"Could not reach OpenRouter: {exc.reason}") from exc
     except Exception as exc:
-        raise ValueError(f"OpenRouter request failed: {exc}") from exc
+        raise APIError(f"OpenRouter request failed: {exc}") from exc
 
     return _extract_message_content(data)
 
@@ -403,10 +452,10 @@ def _extract_json_object(content: str) -> dict:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise ValueError("OpenRouter returned invalid JSON.") from exc
+        raise APIError("OpenRouter returned invalid JSON.") from exc
 
     if not isinstance(parsed, dict):
-        raise ValueError("OpenRouter returned an unexpected JSON shape.")
+        raise APIError("OpenRouter returned an unexpected JSON shape.")
 
     return parsed
 
